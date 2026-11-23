@@ -108,6 +108,11 @@ var failed: Array = []
 var skipped: Array = []
 var failed_reason: Array = []
 var fail_details: Array = []
+#comparison warnings (actual array longer than expected), per test file
+#information only: they never change the PASS/FAIL result
+var comparison_warnings: Dictionary = {}
+#warnings of the comparison currently running (reset before each attempt)
+var _current_comparison_warnings: Array = []
 
 var skipped_reason: Array = []
 var finished: bool = false
@@ -468,6 +473,7 @@ func reset():
 	skipped = []
 	failed_reason = []
 	fail_details = []
+	comparison_warnings = {}
 
 	skipped_reason = []
 	finished = false
@@ -1402,7 +1408,16 @@ remotesync func finalize_test_allclients(force_status:int, attempts = 1):
 		return
 	var current_gamestate = gameData.save_gamedata()
 	
-	if check_test_passed(current_gamestate):
+	#each attempt starts empty and overwrites the previous one (see retry
+	#below), so only the warnings of the last attempt are kept
+	_current_comparison_warnings = []
+	var test_passed = check_test_passed(current_gamestate)
+	if _current_comparison_warnings:
+		comparison_warnings[current_test_file] = _current_comparison_warnings.duplicate()
+	else:
+		comparison_warnings.erase(current_test_file)
+
+	if test_passed:
 		passed.append(current_test_file)
 		result = TestStatus.PASSED
 	else:
@@ -1458,6 +1473,19 @@ func _get_shortname(element):
 		return element
 	return card_data.get("shortname", card_data.get("Name", element))
 
+#records that the actual array has more items than the expected one
+#(those extra items are not checked). Read only: changes neither array
+func _add_comparison_warning(expected:Array, actual:Array, _parent_name):
+	var extra_items = []
+	for j in range(expected.size(), actual.size()):
+		var item = actual[j]
+		if typeof(item) == TYPE_DICTIONARY and item.has("card"):
+			extra_items.append(str(_get_display_name(item["card"])))
+		else:
+			extra_items.append(str(item))
+	_current_comparison_warnings.append("(" + str(_parent_name) + ") expected " \
+		+ str(expected.size()) + " item(s), got " + str(actual.size()) \
+		+ ", not checked: " + PoolStringArray(extra_items).join(", "))
 
 #check if all elements of dict1 can be found in dict2
 #This doesn't mean the dictionaries are necessarily equal
@@ -1524,6 +1552,9 @@ func is_element1_in_element2 (element1, element2, _parent_name = "")-> bool:
 			if (element1.size() > element2.size()): #Should we rather check for not equal here?
 				failed_reason.append ("arrays not same size (" + _parent_name  + ")\n" + String(element1) + "\n" + String(element2))
 				return false
+			#the extra items of element2 are never compared: warn, don't fail
+			if (element1.size() < element2.size()):
+				_add_comparison_warning(element1, element2, _parent_name)
 			var i:int = 0
 			for value in element1:
 				if !is_element1_in_element2(element1[i], element2[i], _parent_name):
@@ -1967,6 +1998,14 @@ remotesync func save_results():
 	for passed_file in passed:
 		to_print = to_print + "\t" + passed_file + "\n"	
 
+	#information only, these don't change the results above
+	to_print +=  "###\narray comparison warnings (actual longer than expected, extra items not checked): " \
+		+ str(comparison_warnings.size()) + " test(s)\n"
+	for warned_file in comparison_warnings:
+		to_print += "\t" + warned_file + "\n"
+		for warning in comparison_warnings[warned_file]:
+			to_print += "\t\t" + warning + "\n"
+
 	for fail_detail in fail_details:
 		to_print +=  fail_detail + "\n"	
 
@@ -2020,6 +2059,7 @@ func _results_as_dict() -> Dictionary:
 		"skipped": skipped,
 		"skipped_reason": skipped_reason,
 		"fail_details": fail_details,
+		"comparison_warnings": comparison_warnings,
 		"count_delays": count_delays,
 		"delays_timer": timers,
 		"test_durations": test_durations,
@@ -2053,6 +2093,9 @@ func _merge_worker_results(worker_results: Dictionary):
 			skipped.append(worker_skipped[j])
 			skipped_reason.append(worker_skipped_reason[j] if j < worker_skipped_reason.size() else "")
 		fail_details += data.get("fail_details", [])
+		var worker_warnings = data.get("comparison_warnings", {})
+		for key in worker_warnings:
+			comparison_warnings[key] = worker_warnings[key]
 		var worker_delays = data.get("count_delays", {})
 		for key in worker_delays:
 			count_delays[key] = count_delays.get(key, 0) + int(worker_delays[key])
